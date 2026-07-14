@@ -53,6 +53,17 @@ The included `Jenkinsfile` validates and plans every run, then pauses for approv
 
 Run the pipeline with the target `ENVIRONMENT`, `AWS_REGION`, existing `STATE_BUCKET`, and operation (`plan`, `apply`, or `destroy`). State keys are calculated automatically by environment and region. The Jenkins agent needs Terraform installed and the AWS Credentials Binding, Credentials Binding, and Workspace Cleanup plugins.
 
+## GitHub Actions CI/CD
+
+`.github/workflows/terraform.yml` provides the equivalent manually triggered workflow. Select the environment, region, action, state bucket, and lock table in the **Run workflow** form. It initializes, formats, validates, and plans every run; `apply` and `destroy` then use the generated plan artifact.
+
+Configure these repository secrets:
+
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: credentials with permission to manage the target infrastructure and access the remote state bucket. Set `AWS_SESSION_TOKEN` too when using temporary credentials.
+- `TF_VAR_DB_PASSWORD`: the RDS password passed to Terraform as a sensitive input.
+
+To retain Jenkins-style approval before changing infrastructure, create GitHub Environments named `dev`, `stage`, and `prod`, then add required reviewers in each environment's protection rules. The workflow's `apply` job targets the selected environment and waits for that approval; `plan` runs without it.
+
 ## Learning notes
 
 - The single NAT gateway reduces cost and keeps the network module approachable, but is not highly available. Use one NAT gateway per AZ for production workloads.

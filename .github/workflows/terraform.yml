@@ -1,0 +1,157 @@
+name: Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to manage
+        required: true
+        type: choice
+        options:
+          - dev
+          - stage
+          - prod
+      aws_region:
+        description: AWS Region for this stack
+        required: true
+        default: us-east-1
+        type: string
+      action:
+        description: Terraform operation
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+      state_bucket:
+        description: Existing S3 bucket that stores Terraform state
+        required: true
+        type: string
+      lock_table:
+        description: Existing DynamoDB table used for state locking
+        required: true
+        default: terraform-state-locks
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-${{ inputs.environment }}-${{ inputs.aws_region }}
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_WORKING_DIR: environments/${{ inputs.environment }}/${{ inputs.aws_region }}
+  TF_STATE_KEY: three-tier/${{ inputs.environment }}/${{ inputs.aws_region }}/terraform.tfstate
+
+jobs:
+  plan:
+    name: Terraform plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Check inputs
+        run: |
+          test -d "$TF_WORKING_DIR"
+          terraform version
+
+      - name: Initialize and validate Terraform
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket=${{ inputs.state_bucket }}" \
+            -backend-config="key=$TF_STATE_KEY" \
+            -backend-config="region=${{ inputs.aws_region }}" \
+            -backend-config="dynamodb_table=${{ inputs.lock_table }}" \
+            -backend-config="encrypt=true"
+          terraform fmt -check -recursive
+          terraform validate
+
+      - name: Create Terraform plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
+        run: |
+          if [ "${{ inputs.action }}" = "destroy" ]; then
+            terraform plan -destroy -out=tfplan
+          else
+            terraform plan -out=tfplan
+          fi
+
+      - name: Upload Terraform plan
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ inputs.environment }}-${{ inputs.aws_region }}
+          path: ${{ env.TF_WORKING_DIR }}/tfplan
+          if-no-files-found: warn
+          retention-days: 1
+
+  apply:
+    name: Terraform apply
+    needs: plan
+    if: ${{ inputs.action == 'apply' || inputs.action == 'destroy' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Download Terraform plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-${{ inputs.environment }}-${{ inputs.aws_region }}
+          path: ${{ env.TF_WORKING_DIR }}
+
+      - name: Initialize Terraform
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket=${{ inputs.state_bucket }}" \
+            -backend-config="key=$TF_STATE_KEY" \
+            -backend-config="region=${{ inputs.aws_region }}" \
+            -backend-config="dynamodb_table=${{ inputs.lock_table }}" \
+            -backend-config="encrypt=true"
+
+      - name: Apply Terraform plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          TF_VAR_db_password: ${{ secrets.TF_VAR_DB_PASSWORD }}
+        run: terraform apply -auto-approve tfplan
